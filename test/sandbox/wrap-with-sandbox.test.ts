@@ -273,6 +273,34 @@ describe('restriction pattern semantics', () => {
         expect(result).toContain('bwrap')
       },
     )
+
+    it.if(isLinux)(
+      'restores nested write paths after broad read allowances on Linux',
+      async () => {
+        const root = join(tmpdir(), `srt-nested-bind-${process.pid}`)
+        const cache = join(root, 'cache')
+        const uvCache = join(cache, 'uv')
+        mkdirSync(uvCache, { recursive: true })
+
+        try {
+          const result = await wrapCommandWithSandboxLinux({
+            command,
+            needsNetworkRestriction: false,
+            readConfig: { denyOnly: [root], allowWithinDeny: [cache] },
+            writeConfig: { allowOnly: [uvCache], denyWithinAllow: [] },
+          })
+
+          const readOnlyCacheBind = `--ro-bind ${cache} ${cache}`
+          const writableUvBind = `--bind ${uvCache} ${uvCache}`
+          expect(result).toContain(readOnlyCacheBind)
+          expect(result.lastIndexOf(writableUvBind)).toBeGreaterThan(
+            result.indexOf(readOnlyCacheBind),
+          )
+        } finally {
+          rmSync(root, { recursive: true, force: true })
+        }
+      },
+    )
   })
 
   describe('explicit binary paths (Linux)', () => {
