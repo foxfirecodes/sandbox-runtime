@@ -39,12 +39,13 @@ function toCArray(bytes: Buffer): string {
 
 mkdirSync(OUT, { recursive: true })
 
-const cflags = ['-static', '-O2', '-Wall', '-Wextra']
+const commonCflags = ['-O2', '-Wall', '-Wextra']
+const staticCflags = ['-static', ...commonCflags]
 
 const gen = join(OUT, 'seccomp-unix-block')
 run([
   'gcc',
-  ...cflags,
+  ...commonCflags,
   '-o',
   gen,
   join(SRC, 'seccomp-unix-block.c'),
@@ -78,7 +79,7 @@ writeFileSync(
 
 run([
   'gcc',
-  ...cflags,
+  ...staticCflags,
   '-I',
   OUT,
   '-o',
