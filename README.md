@@ -1,4 +1,14 @@
+
 # Anthropic Sandbox Runtime (srt)
+
+This is a fork of [`anthropic-experimental/sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime) that adds additional functionality for use in pi extensions that I build/maintain (such as [`pi-auto`](https://github.com/yonilerner/pi-auto)).
+
+Documentation in this REAMDE has been updated to account for changes that have been made. Most notably:
+
+- a bugfix for combo read/write binds, so that write binds inside of read binds dont get overridden by the read binds
+- addition of `disableDefaultNoProxy` which disables the `NO_PROXY=localhost,127.0.0.1,...` env that the sandbox sets by default so you can have local requests proxied and be able to hit locally running services outside the sandbox
+
+---
 
 A lightweight sandboxing tool for enforcing filesystem and network restrictions on arbitrary processes at the OS level, without requiring a container.
 

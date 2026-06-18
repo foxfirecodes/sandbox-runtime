@@ -4,3 +4,4 @@ dist
 .DS_Store
 vendor/seccomp/x64/
 vendor/seccomp/arm64/
+AGENTS.local.md
