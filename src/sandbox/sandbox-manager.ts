@@ -829,6 +829,10 @@ async function wrapWithSandbox(
 
   // Check custom config to allow pseudo-terminal (can be applied dynamically)
   const allowPty = customConfig?.allowPty ?? config?.allowPty
+  const disableDefaultNoProxy =
+    customConfig?.network?.disableDefaultNoProxy ??
+    config?.network?.disableDefaultNoProxy ??
+    false
 
   switch (platform) {
     case 'macos':
@@ -841,6 +845,7 @@ async function wrapWithSandbox(
         socksProxyPort: needsNetworkProxy ? getSocksProxyPort() : undefined,
         proxyAuthToken: needsNetworkProxy ? proxyAuthToken : undefined,
         caCertPath: mitmCA?.certPath,
+        disableDefaultNoProxy,
         readConfig,
         writeConfig,
         allowUnixSockets: getAllowUnixSockets(),
@@ -874,6 +879,7 @@ async function wrapWithSandbox(
           : undefined,
         proxyAuthToken: needsNetworkProxy ? proxyAuthToken : undefined,
         caCertPath: mitmCA?.certPath,
+        disableDefaultNoProxy,
         readConfig,
         writeConfig,
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
@@ -941,6 +947,10 @@ async function wrapWithSandboxArgv(
       httpProxyPort: hasNetworkConfig ? getProxyPort() : undefined,
       socksProxyPort: hasNetworkConfig ? getSocksProxyPort() : undefined,
       proxyAuthToken: hasNetworkConfig ? proxyAuthToken : undefined,
+      disableDefaultNoProxy:
+        customConfig?.network?.disableDefaultNoProxy ??
+        config?.network?.disableDefaultNoProxy ??
+        false,
       binShell,
     })
   }

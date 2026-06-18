@@ -5,6 +5,26 @@ import {
 } from '../../src/sandbox/sandbox-utils.js'
 
 describe('generateProxyEnvVars', () => {
+  it('sets NO_PROXY/no_proxy defaults when proxy ports are configured', () => {
+    const env = generateProxyEnvVars(3128, 1080)
+
+    expect(env).toContain(
+      'NO_PROXY=localhost,127.0.0.1,::1,*.local,.local,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16',
+    )
+    expect(env).toContain(
+      'no_proxy=localhost,127.0.0.1,::1,*.local,.local,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16',
+    )
+  })
+
+  it('omits NO_PROXY/no_proxy defaults when disabled', () => {
+    const env = generateProxyEnvVars(3128, 1080, undefined, undefined, true)
+
+    expect(env.some(v => v.startsWith('NO_PROXY='))).toBe(false)
+    expect(env.some(v => v.startsWith('no_proxy='))).toBe(false)
+    expect(env).toContain('HTTP_PROXY=http://localhost:3128')
+    expect(env).toContain('ALL_PROXY=socks5h://localhost:1080')
+  })
+
   it('sets CLOUDSDK_PROXY_TYPE to http (gcloud rejects "https")', () => {
     // gcloud's proxy/type only accepts http, http_no_tunnel, socks4, socks5.
     // Our local proxy is an HTTP CONNECT proxy regardless of the traffic it

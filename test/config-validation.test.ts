@@ -95,6 +95,7 @@ describe('Config Validation', () => {
         allowUnixSockets: ['/var/run/docker.sock'],
         allowAllUnixSockets: false,
         allowLocalBinding: true,
+        disableDefaultNoProxy: true,
       },
       filesystem: {
         denyRead: ['/etc/shadow'],
