@@ -43,6 +43,8 @@ export interface LinuxSandboxParams {
   proxyAuthToken?: string
   /** Path to the TLS-termination CA cert; injected as trust env vars. */
   caCertPath?: string
+  /** If true, do not inject default NO_PROXY/no_proxy env vars. */
+  disableDefaultNoProxy?: boolean
   readConfig?: FsReadRestrictionConfig
   writeConfig?: FsWriteRestrictionConfig
   enableWeakerNestedSandbox?: boolean
@@ -1263,6 +1265,7 @@ export async function wrapCommandWithSandboxLinux(
           1080, // Internal SOCKS listener port
           caCertPath,
           proxyAuthToken,
+          params.disableDefaultNoProxy,
         )
         bwrapArgs.push(
           ...proxyEnv.flatMap((env: string) => {

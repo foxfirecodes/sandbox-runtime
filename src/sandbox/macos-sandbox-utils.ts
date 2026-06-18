@@ -29,6 +29,8 @@ export interface MacOSSandboxParams {
   proxyAuthToken?: string
   /** Path to the TLS-termination CA cert; injected as trust env vars. */
   caCertPath?: string
+  /** If true, do not inject default NO_PROXY/no_proxy env vars. */
+  disableDefaultNoProxy?: boolean
   allowUnixSockets?: string[]
   allowAllUnixSockets?: boolean
   allowLocalBinding?: boolean
@@ -819,6 +821,7 @@ export function wrapCommandWithSandboxMacOS(
     socksProxyPort,
     caCertPath,
     proxyAuthToken,
+    params.disableDefaultNoProxy,
   )
 
   // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work

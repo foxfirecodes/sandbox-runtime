@@ -145,6 +145,14 @@ export const NetworkConfigSchema = z.object({
     .boolean()
     .optional()
     .describe('Whether to allow binding to local ports (default: false)'),
+  disableDefaultNoProxy: z
+    .boolean()
+    .optional()
+    .describe(
+      'If true, do not inject the default NO_PROXY/no_proxy env vars for ' +
+        'sandboxed processes. By default SRT sets NO_PROXY/no_proxy to ' +
+        'localhost, loopback, .local, link-local, and RFC1918 private ranges.',
+    ),
   allowMachLookup: z
     .array(
       z.string().refine(

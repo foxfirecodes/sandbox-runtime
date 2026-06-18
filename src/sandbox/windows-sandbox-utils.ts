@@ -71,6 +71,8 @@ export interface WindowsSandboxParams {
   socksProxyPort?: number
   /** Per-session proxy auth token; embedded in proxy env URLs. */
   proxyAuthToken?: string
+  /** If true, do not inject default NO_PROXY/no_proxy env vars. */
+  disableDefaultNoProxy?: boolean
   /**
    * Inner shell. `cmd` (default), `powershell`, or `pwsh`. The child's
    * post-`/c` content is **passthrough** — `&` chains, `"…"` quotes
@@ -497,6 +499,7 @@ export function wrapCommandWithSandboxWindows(p: WindowsSandboxParams): {
       p.socksProxyPort,
       undefined,
       p.proxyAuthToken,
+      p.disableDefaultNoProxy,
     ),
   )
   // TMPDIR is a POSIX path meant for the macOS/Linux FS sandbox — it

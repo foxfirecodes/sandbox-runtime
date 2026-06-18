@@ -317,6 +317,7 @@ export function generateProxyEnvVars(
   socksProxyPort?: number,
   caCertPath?: string,
   proxyAuthToken?: string,
+  disableDefaultNoProxy = false,
 ): string[] {
   // When the proxy requires auth, embed the credential in the URL so clients
   // send Proxy-Authorization automatically. Only the sandbox child sees this
@@ -343,20 +344,25 @@ export function generateProxyEnvVars(
     return envVars
   }
 
-  // Always set NO_PROXY to exclude localhost and private networks from proxying
-  const noProxyAddresses = [
-    'localhost',
-    '127.0.0.1',
-    '::1',
-    '*.local',
-    '.local',
-    '169.254.0.0/16', // Link-local
-    '10.0.0.0/8', // Private network
-    '172.16.0.0/12', // Private network
-    '192.168.0.0/16', // Private network
-  ].join(',')
-  envVars.push(`NO_PROXY=${noProxyAddresses}`)
-  envVars.push(`no_proxy=${noProxyAddresses}`)
+  // By default, set NO_PROXY to exclude localhost and private networks from
+  // proxying. Some embedders intentionally want localhost/private traffic to
+  // flow through the sandbox proxy for policy/prompting, so this can be
+  // disabled via network.disableDefaultNoProxy.
+  if (!disableDefaultNoProxy) {
+    const noProxyAddresses = [
+      'localhost',
+      '127.0.0.1',
+      '::1',
+      '*.local',
+      '.local',
+      '169.254.0.0/16', // Link-local
+      '10.0.0.0/8', // Private network
+      '172.16.0.0/12', // Private network
+      '192.168.0.0/16', // Private network
+    ].join(',')
+    envVars.push(`NO_PROXY=${noProxyAddresses}`)
+    envVars.push(`no_proxy=${noProxyAddresses}`)
+  }
 
   if (httpProxyPort) {
     envVars.push(`HTTP_PROXY=http://${auth}localhost:${httpProxyPort}`)

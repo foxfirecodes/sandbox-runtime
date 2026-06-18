@@ -258,7 +258,8 @@ srt --settings /path/to/srt-settings.json <command>
     ],
     "deniedDomains": ["malicious.com"],
     "allowUnixSockets": ["/var/run/docker.sock"],
-    "allowLocalBinding": false
+    "allowLocalBinding": false,
+    "disableDefaultNoProxy": false
   },
   "filesystem": {
     "denyRead": ["~/.ssh"],
@@ -286,6 +287,7 @@ Uses an **allow-only pattern** - all network access is denied by default.
 - `network.allowedDomains` - Array of allowed domains (supports wildcards like `*.example.com`). Empty array = no network access.
 - `network.deniedDomains` - Array of denied domains (checked first, takes precedence over allowedDomains)
 - `network.allowLocalBinding` - Allow binding to local ports (boolean, default: false)
+- `network.disableDefaultNoProxy` - Do not set the default `NO_PROXY`/`no_proxy` env vars in sandboxed processes (boolean, default: false). By default, SRT sets both variables to bypass the proxy for `localhost`, `127.0.0.1`, `::1`, `.local`, link-local, and RFC1918 private ranges. Set this to `true` when you want those destinations to flow through the sandbox proxy instead of being excluded by env vars.
 
 **Unix Socket Settings** (platform-specific behavior):
 
@@ -661,6 +663,7 @@ Users should be aware of potential risks that come from allowing broad domains l
 - Linux Sandbox Strength: The Linux implementation provides strong filesystem and network isolation but includes an `enableWeakerNestedSandbox` mode that enables it to work inside of Docker environments without privileged namespaces. This option considerably weakens security and should only be used in cases where additional isolation is otherwise enforced.
 - Weaker Network Isolation (macOS): The `enableWeakerNetworkIsolation` option re-enables access to `com.apple.trustd.agent`, which is needed for Go programs to verify TLS certificates via the macOS Security framework. This opens a potential data exfiltration vector through the trustd service and should only be enabled when Go TLS verification is required (e.g., when using `httpProxyPort` with a MITM proxy and custom CA).
 - Apple Events (macOS): The `allowAppleEvents` option re-enables sending Apple Events and Launch Services open requests (`(allow appleevent-send)`, `(allow lsopen)`, and mach-lookups for `com.apple.coreservices.appleevents`, `com.apple.CoreServices.coreservicesd`, and `com.apple.coreservices.quarantine-resolver`), which `open`, `osascript`, and URL-opening helpers require. With these allowed, a sandboxed command can launch arbitrary applications with no user prompt, and launched applications run outside the sandbox entirely — so this option removes code-execution isolation, not just weakens it. Scripting already-running applications via Apple Events is additionally gated by macOS TCC automation consent, but launching via `open` is not. Only enable this when commands inside the sandbox genuinely need to open URLs or applications.
+- Default NO_PROXY bypass: By default, sandboxed processes receive `NO_PROXY`/`no_proxy` entries for loopback, `.local`, link-local, and private network ranges. Setting `network.disableDefaultNoProxy: true` removes those env vars, so HTTP clients that honor proxy env vars may send requests for those destinations through SRT's proxy. Only enable it when that behavior is intentional for your policy or prompt flow.
 
 ### Known Limitations and Future Work
 
