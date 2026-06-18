@@ -21,7 +21,8 @@ A lightweight sandboxing tool for enforcing filesystem and network restrictions 
 ## Installation
 
 ```bash
-npm install -g @anthropic-ai/sandbox-runtime
+# @foxfire tag necessary because i do all my publishes as prereleases
+npm install -g @foxfirecodes/sandbox-runtime@foxfire
 ```
 
 ## Basic Usage
@@ -186,7 +187,7 @@ srt --settings /path/to/srt-settings.json npm install
 import {
   SandboxManager,
   type SandboxRuntimeConfig,
-} from '@anthropic-ai/sandbox-runtime'
+} from '@foxfirecodes/sandbox-runtime'
 import { spawn } from 'child_process'
 
 // Define your sandbox configuration
@@ -225,10 +226,10 @@ child.on('exit', async code => {
 
 ```typescript
 // Main sandbox manager
-export { SandboxManager } from '@anthropic-ai/sandbox-runtime'
+export { SandboxManager } from '@foxfirecodes/sandbox-runtime'
 
 // Violation tracking
-export { SandboxViolationStore } from '@anthropic-ai/sandbox-runtime'
+export { SandboxViolationStore } from '@foxfirecodes/sandbox-runtime'
 
 // TypeScript types
 export type {
@@ -240,7 +241,7 @@ export type {
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
-} from '@anthropic-ai/sandbox-runtime'
+} from '@foxfirecodes/sandbox-runtime'
 ```
 
 ## Configuration
