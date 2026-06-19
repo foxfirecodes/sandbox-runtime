@@ -7,6 +7,7 @@ Documentation in this REAMDE has been updated to account for changes that have b
 
 - a bugfix for combo read/write binds, so that write binds inside of read binds dont get overridden by the read binds
 - addition of `disableDefaultNoProxy` which disables the `NO_PROXY=localhost,127.0.0.1,...` env that the sandbox sets by default so you can have local requests proxied and be able to hit locally running services outside the sandbox
+- support for sandbox violation logging & annotations on Linux by using strace (originally documented as future work)
 
 ---
 
