@@ -318,11 +318,14 @@ export function generateProxyEnvVars(
   caCertPath?: string,
   proxyAuthToken?: string,
   disableDefaultNoProxy = false,
+  proxyAuthUsername = 'srt',
 ): string[] {
   // When the proxy requires auth, embed the credential in the URL so clients
   // send Proxy-Authorization automatically. Only the sandbox child sees this
   // env, so the token never reaches host processes.
-  const auth = proxyAuthToken ? `srt:${proxyAuthToken}@` : ''
+  const auth = proxyAuthToken
+    ? `${encodeURIComponent(proxyAuthUsername)}:${encodeURIComponent(proxyAuthToken)}@`
+    : ''
   // Respect the caller-provided temp dir if set, otherwise fall back to
   // /tmp/claude. CLAUDE_CODE_TMPDIR is the current name; CLAUDE_TMPDIR is
   // kept for backwards compatibility (#141).
@@ -405,7 +408,9 @@ export function generateProxyEnvVars(
       // Linux: use socat HTTP CONNECT via the HTTP proxy bridge.
       // socat is already a required Linux sandbox dependency, and PROXY: is
       // portable across all socat versions (unlike SOCKS5-CONNECT which needs >= 1.8.0).
-      const socatAuth = proxyAuthToken ? `,proxyauth=srt:${proxyAuthToken}` : ''
+      const socatAuth = proxyAuthToken
+        ? `,proxyauth=${proxyAuthUsername}:${proxyAuthToken}`
+        : ''
       envVars.push(
         `GIT_SSH_COMMAND=ssh ${sshMuxOverride} -o ProxyCommand='socat - PROXY:localhost:%h:%p,proxyport=${httpProxyPort}${socatAuth}'`,
       )
@@ -448,7 +453,7 @@ export function generateProxyEnvVars(
       envVars.push(`CLOUDSDK_PROXY_ADDRESS=localhost`)
       envVars.push(`CLOUDSDK_PROXY_PORT=${httpProxyPort}`)
       if (proxyAuthToken) {
-        envVars.push(`CLOUDSDK_PROXY_USERNAME=srt`)
+        envVars.push(`CLOUDSDK_PROXY_USERNAME=${proxyAuthUsername}`)
         envVars.push(`CLOUDSDK_PROXY_PASSWORD=${proxyAuthToken}`)
       }
     }

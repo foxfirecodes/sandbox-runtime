@@ -629,18 +629,7 @@ When a sandboxed process attempts to access a restricted resource:
 log stream --predicate 'process == "sandbox-exec"' --style syslog
 ```
 
-**Linux**: Bubblewrap doesn't provide built-in violation reporting. Use `strace` to trace system calls and identify blocked operations:
-
-```bash
-# Trace all denied operations
-strace -f srt <your-command> 2>&1 | grep EPERM
-
-# Trace specific file operations
-strace -f -e trace=open,openat,stat,access srt <your-command> 2>&1 | grep EPERM
-
-# Trace network operations
-strace -f -e trace=network srt <your-command> 2>&1 | grep EPERM
-```
+**Linux**: Bubblewrap doesn't provide built-in violation reporting, so enabling `enableLogMonitor` uses optimized per-command `strace` tracing. The tracer runs inside the bubblewrap sandbox around the user workload, records only failed file/network syscalls (`-e status=failed`), and feeds parsed events into `SandboxViolationStore` for stderr annotations. Linux monitoring requires `strace`; initialization fails clearly when monitoring is requested and `strace` is unavailable.
 
 ### Advanced: Bring Your Own Proxy
 
@@ -683,5 +672,3 @@ Users should be aware of potential risks that come from allowing broad domains l
 **Future improvements:**
 
 - **Proxychains support**: Add support for `proxychains` with `LD_PRELOAD` on Linux to intercept network calls at a lower level, making bypass more difficult
-
-- **Linux violation monitoring**: Implement automatic `strace`-based violation detection for Linux, integrated with the violation store. Currently, Linux users must manually run `strace` to see violations, unlike macOS which has automatic violation monitoring via the system log store

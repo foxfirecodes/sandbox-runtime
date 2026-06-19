@@ -12,7 +12,11 @@ import {
 } from './parent-proxy.js'
 
 export interface SocksProxyServerOptions {
-  filter(port: number, host: string): Promise<boolean> | boolean
+  filter(
+    port: number,
+    host: string,
+    context?: { runId?: string },
+  ): Promise<boolean> | boolean
 
   /**
    * Optional upstream HTTP proxy. When present, SOCKS CONNECT requests are
@@ -44,7 +48,9 @@ export function createSocksProxyServer(
 
   if (options.proxyAuthToken) {
     socksServer.setAuthHandler((conn, accept, deny) => {
-      if (conn.username === 'srt' && conn.password === options.proxyAuthToken) {
+      const username = conn.username
+      const validUsername = username === 'srt' || username.startsWith('srt-')
+      if (validUsername && conn.password === options.proxyAuthToken) {
         accept()
       } else {
         logForDebugging('SOCKS auth rejected', { level: 'error' })
@@ -72,7 +78,10 @@ export function createSocksProxyServer(
 
       logForDebugging(`Connection request to ${hostname}:${port}`)
 
-      const allowed = await options.filter(port, hostname)
+      const runId = conn.username?.startsWith('srt-')
+        ? conn.username.slice('srt-'.length)
+        : undefined
+      const allowed = await options.filter(port, hostname, { runId })
 
       if (!allowed) {
         logForDebugging(`Connection blocked to ${hostname}:${port}`, {

@@ -33,6 +33,7 @@ export interface HttpProxyServerOptions {
     port: number,
     host: string,
     socket: Socket | Duplex,
+    context?: { runId?: string },
   ): Promise<boolean> | boolean
 
   /**
@@ -81,13 +82,23 @@ export interface HttpProxyServerOptions {
 export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
   const server = createServer()
 
-  const checkAuth = (got: string | undefined): boolean => {
-    if (!options.proxyAuthToken) return true
+  const checkAuth = (
+    got: string | undefined,
+  ): { ok: boolean; runId?: string } => {
+    if (!options.proxyAuthToken) return { ok: true }
     const m = /^basic\s+([a-z0-9+/=]+)\s*$/i.exec(got ?? '')
-    if (!m) return false
+    if (!m) return { ok: false }
     const decoded = Buffer.from(m[1]!, 'base64').toString('utf8')
     const sep = decoded.indexOf(':')
-    return sep > 0 && decoded.slice(sep + 1) === options.proxyAuthToken
+    if (sep <= 0 || decoded.slice(sep + 1) !== options.proxyAuthToken) {
+      return { ok: false }
+    }
+    const username = decoded.slice(0, sep)
+    if (username === 'srt') return { ok: true }
+    if (username.startsWith('srt-')) {
+      return { ok: true, runId: username.slice('srt-'.length) }
+    }
+    return { ok: false }
   }
 
   // Handle CONNECT requests for HTTPS traffic
@@ -104,7 +115,8 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
     })
 
     try {
-      if (!checkAuth(req.headers['proxy-authorization'])) {
+      const auth = checkAuth(req.headers['proxy-authorization'])
+      if (!auth.ok) {
         socket.end(
           'HTTP/1.1 407 Proxy Authentication Required\r\n' +
             'Proxy-Authenticate: Basic realm="srt"\r\n\r\n',
@@ -121,7 +133,9 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
       }
       const { hostname, port } = target
 
-      const allowed = await options.filter(port, hostname, socket)
+      const allowed = await options.filter(port, hostname, socket, {
+        runId: auth.runId,
+      })
       if (!allowed) {
         logForDebugging(`Connection blocked to ${hostname}:${port}`, {
           level: 'error',
@@ -242,7 +256,8 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
   // Handle regular HTTP requests
   server.on('request', async (req, res) => {
     try {
-      if (!checkAuth(req.headers['proxy-authorization'])) {
+      const auth = checkAuth(req.headers['proxy-authorization'])
+      if (!auth.ok) {
         res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="srt"' })
         res.end()
         return
@@ -255,7 +270,9 @@ export function createHttpProxyServer(options: HttpProxyServerOptions): Server {
           ? 443
           : 80
 
-      const allowed = await options.filter(port, hostname, req.socket)
+      const allowed = await options.filter(port, hostname, req.socket, {
+        runId: auth.runId,
+      })
       if (!allowed) {
         logForDebugging(`HTTP request blocked to ${hostname}:${port}`, {
           level: 'error',

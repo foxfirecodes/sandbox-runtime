@@ -51,6 +51,15 @@ import { isIP } from 'node:net'
 import type { ChildProcess } from 'node:child_process'
 import type { ResolvedParentProxy } from './parent-proxy.js'
 import { EOL } from 'node:os'
+import {
+  createLinuxViolationTraceSession,
+  getLinuxStraceConfig,
+  parseLinuxViolationTraceSession,
+  shouldIgnoreLinuxViolation,
+  toLinuxViolationTraceConfig,
+  type LinuxStraceConfig,
+  type LinuxViolationTraceSession,
+} from './linux-violation-tracer.js'
 
 interface HostNetworkManagerContext {
   httpProxyPort: number
@@ -75,6 +84,9 @@ let mitmCA: MitmCA | undefined
 // the sandbox child env, checked on every CONNECT/request — so a host process
 // dialing 127.0.0.1:<proxyPort> can't reach the filter callback.
 let proxyAuthToken: string | undefined
+let violationMonitoringEnabled = false
+let linuxStraceConfig: LinuxStraceConfig | undefined
+const linuxTraceSessions = new Map<string, LinuxViolationTraceSession>()
 const sandboxViolationStore = new SandboxViolationStore()
 
 // ============================================================================
@@ -95,6 +107,52 @@ function registerCleanup(): void {
   process.once('SIGINT', cleanupHandler)
   process.once('SIGTERM', cleanupHandler)
   cleanupRegistered = true
+}
+
+function getProxyAuthUsernameForRun(runId?: string): string | undefined {
+  return runId ? `srt-${runId}` : undefined
+}
+
+function parseLinuxTraceSessionsForCommand(command?: string): void {
+  if (getPlatform() !== 'linux') return
+
+  for (const session of linuxTraceSessions.values()) {
+    if (session.parsed) continue
+    if (command && session.command !== command) continue
+    for (const violation of parseLinuxViolationTraceSession(
+      session,
+      config?.ignoreViolations,
+    )) {
+      sandboxViolationStore.addViolation(violation)
+    }
+  }
+}
+
+function addLinuxProxyViolation(
+  runId: string | undefined,
+  host: string,
+  port: number,
+): void {
+  if (!violationMonitoringEnabled || getPlatform() !== 'linux' || !runId) {
+    return
+  }
+
+  const session = linuxTraceSessions.get(runId)
+  if (!session) return
+
+  const line = `linux proxy denied: ${host}:${port} blocked by allowlist`
+  if (
+    shouldIgnoreLinuxViolation(line, session.command, config?.ignoreViolations)
+  ) {
+    return
+  }
+
+  sandboxViolationStore.addViolation({
+    line,
+    command: session.command,
+    encodedCommand: session.encodedCommand,
+    timestamp: new Date(),
+  })
 }
 
 function matchesDomainPattern(hostname: string, pattern: string): boolean {
@@ -121,6 +179,7 @@ async function filterNetworkRequest(
   port: number,
   host: string,
   sandboxAskCallback?: SandboxAskCallback,
+  runId?: string,
 ): Promise<boolean> {
   if (!config) {
     logForDebugging('No config available, denying network request')
@@ -137,6 +196,7 @@ async function filterNetworkRequest(
     logForDebugging(`Denying malformed host: ${JSON.stringify(host)}:${port}`, {
       level: 'error',
     })
+    addLinuxProxyViolation(runId, host, port)
     return false
   }
 
@@ -149,6 +209,7 @@ async function filterNetworkRequest(
   for (const deniedDomain of config.network.deniedDomains) {
     if (matchesDomainPattern(canonicalHost, deniedDomain)) {
       logForDebugging(`Denied by config rule: ${host}:${port}`)
+      addLinuxProxyViolation(runId, host, port)
       return false
     }
   }
@@ -165,6 +226,7 @@ async function filterNetworkRequest(
   // allowlist deterministic enforcement: never fall through to the callback.
   if (!sandboxAskCallback || config.network.strictAllowlist) {
     logForDebugging(`No matching config rule, denying: ${host}:${port}`)
+    addLinuxProxyViolation(runId, host, port)
     return false
   }
 
@@ -176,12 +238,14 @@ async function filterNetworkRequest(
       return true
     } else {
       logForDebugging(`User denied: ${host}:${port}`)
+      addLinuxProxyViolation(runId, host, port)
       return false
     }
   } catch (error) {
     logForDebugging(`Error in permission callback: ${error}`, {
       level: 'error',
     })
+    addLinuxProxyViolation(runId, host, port)
     return false
   }
 }
@@ -274,8 +338,8 @@ async function startHttpProxyServer(
   excludePorts: ReadonlySet<number>,
 ): Promise<number> {
   httpProxyServer = createHttpProxyServer({
-    filter: (port: number, host: string) =>
-      filterNetworkRequest(port, host, sandboxAskCallback),
+    filter: (port: number, host: string, _socket, context) =>
+      filterNetworkRequest(port, host, sandboxAskCallback, context?.runId),
     getMitmSocketPath,
     mitmCA,
     filterRequest: config?.network.filterRequest,
@@ -305,8 +369,8 @@ async function startSocksProxyServer(
   excludePorts: ReadonlySet<number>,
 ): Promise<number> {
   socksProxyServer = createSocksProxyServer({
-    filter: (port: number, host: string) =>
-      filterNetworkRequest(port, host, sandboxAskCallback),
+    filter: (port: number, host: string, context) =>
+      filterNetworkRequest(port, host, sandboxAskCallback, context?.runId),
     parentProxy,
     proxyAuthToken,
   })
@@ -356,6 +420,8 @@ async function initialize(
 
   // Store config for use by other functions
   config = runtimeConfig
+  violationMonitoringEnabled = enableLogMonitor
+  linuxStraceConfig = undefined
 
   // Resolve parent/upstream proxy from config or HTTP_PROXY env before we
   // start our own listeners (which will later shadow those vars in the child).
@@ -386,13 +452,17 @@ async function initialize(
     )
   }
 
-  // Start log monitor for macOS if enabled
+  // Start violation monitoring if enabled. macOS uses unified logs; Linux
+  // uses per-command optimized strace sessions created in wrapWithSandbox().
   if (enableLogMonitor && getPlatform() === 'macos') {
     logMonitorShutdown = startMacOSSandboxLogMonitor(
       sandboxViolationStore.addViolation.bind(sandboxViolationStore),
       config.ignoreViolations,
     )
     logForDebugging('Started macOS sandbox log monitor')
+  } else if (enableLogMonitor && getPlatform() === 'linux') {
+    linuxStraceConfig = getLinuxStraceConfig()
+    logForDebugging('Enabled Linux sandbox violation tracing')
   }
 
   // Register cleanup handlers first time
@@ -834,6 +904,14 @@ async function wrapWithSandbox(
     config?.network?.disableDefaultNoProxy ??
     false
 
+  const linuxTraceSession =
+    platform === 'linux' && violationMonitoringEnabled && linuxStraceConfig
+      ? createLinuxViolationTraceSession(command)
+      : undefined
+  if (linuxTraceSession) {
+    linuxTraceSessions.set(linuxTraceSession.runId, linuxTraceSession)
+  }
+
   switch (platform) {
     case 'macos':
       // macOS sandbox profile supports glob patterns directly, no ripgrep needed
@@ -878,6 +956,9 @@ async function wrapWithSandbox(
           ? managerContext?.socksProxyPort
           : undefined,
         proxyAuthToken: needsNetworkProxy ? proxyAuthToken : undefined,
+        proxyAuthUsername: needsNetworkProxy
+          ? getProxyAuthUsernameForRun(linuxTraceSession?.runId)
+          : undefined,
         caCertPath: mitmCA?.certPath,
         disableDefaultNoProxy,
         readConfig,
@@ -892,6 +973,9 @@ async function wrapWithSandbox(
         bwrapPath: config?.bwrapPath,
         socatPath: config?.socatPath,
         abortSignal,
+        violationTrace: linuxTraceSession
+          ? toLinuxViolationTraceConfig(linuxTraceSession, linuxStraceConfig!)
+          : undefined,
       })
 
     case 'windows':
@@ -1206,9 +1290,14 @@ async function reset(): Promise<void> {
   // Wait for all servers to close
   await Promise.all(closePromises)
 
+  parseLinuxTraceSessionsForCommand()
+  linuxTraceSessions.clear()
+
   // Clear references
   httpProxyServer = undefined
   proxyAuthToken = undefined
+  violationMonitoringEnabled = false
+  linuxStraceConfig = undefined
   socksProxyServer = undefined
   managerContext = undefined
   initializationPromise = undefined
@@ -1227,6 +1316,8 @@ function annotateStderrWithSandboxFailures(
   if (!config) {
     return stderr
   }
+
+  parseLinuxTraceSessionsForCommand(command)
 
   const violations = sandboxViolationStore.getViolationsForCommand(command)
   if (violations.length === 0) {

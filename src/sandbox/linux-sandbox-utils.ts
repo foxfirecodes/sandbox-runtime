@@ -22,6 +22,7 @@ import type {
 } from './sandbox-schemas.js'
 import { getApplySeccompBinaryPath } from './generate-seccomp-filter.js'
 import type { SeccompConfig } from './sandbox-config.js'
+import type { LinuxViolationTraceConfig } from './linux-violation-tracer.js'
 
 export interface LinuxNetworkBridgeContext {
   httpSocketPath: string
@@ -41,6 +42,8 @@ export interface LinuxSandboxParams {
   socksProxyPort?: number
   /** Per-session proxy auth token; embedded in proxy env URLs. */
   proxyAuthToken?: string
+  /** Optional proxy auth username, used to carry per-command trace context. */
+  proxyAuthUsername?: string
   /** Path to the TLS-termination CA cert; injected as trust env vars. */
   caCertPath?: string
   /** If true, do not inject default NO_PROXY/no_proxy env vars. */
@@ -63,6 +66,8 @@ export interface LinuxSandboxParams {
   socatPath?: string
   /** Abort signal to cancel the ripgrep scan */
   abortSignal?: AbortSignal
+  /** Optimized strace configuration for Linux violation annotations */
+  violationTrace?: LinuxViolationTraceConfig
 }
 
 /** Default max depth for searching dangerous files */
@@ -669,6 +674,7 @@ function buildSandboxCommand(
   applySeccompPrefix: string | undefined,
   shell?: string,
   socatPath?: string,
+  violationTrace?: LinuxViolationTraceConfig,
 ): string {
   // Default to bash for backward compatibility
   const shellPath = shell || 'bash'
@@ -681,19 +687,40 @@ function buildSandboxCommand(
     'trap "kill %1 %2 2>/dev/null; exit" EXIT',
   ]
 
+  const tracedUserCommand = violationTrace
+    ? buildTracedCommand(userCommand, shellPath, violationTrace)
+    : undefined
+
   // apply-seccomp runs after socat so socat can still create Unix sockets.
   if (applySeccompPrefix) {
     const applySeccompCmd =
-      applySeccompPrefix + shellquote.quote([shellPath, '-c', userCommand])
+      applySeccompPrefix +
+      (tracedUserCommand ?? shellquote.quote([shellPath, '-c', userCommand]))
     const innerScript = [...socatCommands, applySeccompCmd].join('\n')
     return `${shellPath} -c ${shellquote.quote([innerScript])}`
   } else {
     const innerScript = [
       ...socatCommands,
-      `eval ${shellquote.quote([userCommand])}`,
+      tracedUserCommand ?? `eval ${shellquote.quote([userCommand])}`,
     ].join('\n')
     return `${shellPath} -c ${shellquote.quote([innerScript])}`
   }
+}
+
+function buildTracedCommand(
+  userCommand: string,
+  shellPath: string,
+  violationTrace: LinuxViolationTraceConfig,
+): string {
+  return shellquote.quote([
+    violationTrace.stracePath,
+    ...violationTrace.straceArgs,
+    '-o',
+    violationTrace.tracePrefix,
+    shellPath,
+    '-c',
+    userCommand,
+  ])
 }
 
 /**
@@ -1161,6 +1188,7 @@ export async function wrapCommandWithSandboxLinux(
     httpProxyPort,
     socksProxyPort,
     proxyAuthToken,
+    proxyAuthUsername,
     caCertPath,
     readConfig,
     writeConfig,
@@ -1174,6 +1202,7 @@ export async function wrapCommandWithSandboxLinux(
     bwrapPath,
     socatPath,
     abortSignal,
+    violationTrace,
   } = params
 
   // Determine if we have restrictions to apply
@@ -1266,6 +1295,7 @@ export async function wrapCommandWithSandboxLinux(
           caCertPath,
           proxyAuthToken,
           params.disableDefaultNoProxy,
+          proxyAuthUsername,
         )
         bwrapArgs.push(
           ...proxyEnv.flatMap((env: string) => {
@@ -1360,14 +1390,22 @@ export async function wrapCommandWithSandboxLinux(
         applySeccompPrefix,
         shell,
         socatPath,
+        violationTrace,
       )
       bwrapArgs.push(sandboxCommand)
     } else if (applySeccompPrefix) {
       const applySeccompCmd =
-        applySeccompPrefix + shellquote.quote([shell, '-c', command])
+        applySeccompPrefix +
+        (violationTrace
+          ? buildTracedCommand(command, shell, violationTrace)
+          : shellquote.quote([shell, '-c', command]))
       bwrapArgs.push(applySeccompCmd)
     } else {
-      bwrapArgs.push(command)
+      bwrapArgs.push(
+        violationTrace
+          ? buildTracedCommand(command, shell, violationTrace)
+          : command,
+      )
     }
 
     const wrappedCommand = shellquote.quote([

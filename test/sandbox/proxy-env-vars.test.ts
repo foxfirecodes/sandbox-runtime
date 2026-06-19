@@ -43,6 +43,21 @@ describe('generateProxyEnvVars', () => {
     expect(env.some(v => v.startsWith('CLOUDSDK_PROXY_'))).toBe(false)
   })
 
+  it('can embed a per-command proxy auth username for violation attribution', () => {
+    const env = generateProxyEnvVars(
+      3128,
+      1080,
+      undefined,
+      'token',
+      false,
+      'srt-run123',
+    )
+
+    expect(env).toContain('HTTP_PROXY=http://srt-run123:token@localhost:3128')
+    expect(env).toContain('ALL_PROXY=socks5h://srt-run123:token@localhost:1080')
+    expect(env).toContain('CLOUDSDK_PROXY_USERNAME=srt-run123')
+  })
+
   describe('caCertPath', () => {
     it('sets all trust env vars to the CA path when provided', () => {
       const env = generateProxyEnvVars(3128, 1080, '/etc/srt/ca.crt')
