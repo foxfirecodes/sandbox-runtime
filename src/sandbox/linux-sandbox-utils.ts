@@ -22,7 +22,11 @@ import type {
 } from './sandbox-schemas.js'
 import { getApplySeccompBinaryPath } from './generate-seccomp-filter.js'
 import type { SeccompConfig } from './sandbox-config.js'
-import type { LinuxViolationTraceConfig } from './linux-violation-tracer.js'
+import type {
+  LinuxReadonlyBindReason,
+  LinuxSandboxMountPlan,
+  LinuxViolationTraceConfig,
+} from './linux-violation-tracer.js'
 
 export interface LinuxNetworkBridgeContext {
   httpSocketPath: string
@@ -723,6 +727,49 @@ function buildTracedCommand(
   ])
 }
 
+interface LinuxFilesystemArgsResult {
+  args: string[]
+  mountPlan: LinuxSandboxMountPlan
+}
+
+function createEmptyMountPlan(): LinuxSandboxMountPlan {
+  return {
+    rootReadonly: false,
+    writableBinds: [],
+    readMasks: [],
+    readAllowBinds: [],
+    readonlyBinds: [],
+  }
+}
+
+function pushUniquePath(paths: string[], value: string): void {
+  if (!paths.includes(value)) paths.push(value)
+}
+
+function pushReadMask(
+  mountPlan: LinuxSandboxMountPlan,
+  path: string,
+  kind: 'tmpfs' | 'dev-null',
+): void {
+  if (!mountPlan.readMasks.some(m => m.path === path && m.kind === kind)) {
+    mountPlan.readMasks.push({ path, kind })
+  }
+}
+
+function pushReadonlyBind(
+  mountPlan: LinuxSandboxMountPlan,
+  path: string,
+  reason: LinuxReadonlyBindReason,
+): void {
+  if (
+    !mountPlan.readonlyBinds.some(
+      bind => bind.path === path && bind.reason === reason,
+    )
+  ) {
+    mountPlan.readonlyBinds.push({ path, reason })
+  }
+}
+
 /**
  * Mount a tmpfs over a read-denied directory, then restore allowRead paths
  * and allowed write paths the tmpfs just wiped. Used by the denyRead loop
@@ -734,9 +781,11 @@ function pushReadDenyDirMounts(
   normalizedPath: string,
   allowedWritePaths: string[],
   readAllowPaths: string[],
+  mountPlan: LinuxSandboxMountPlan,
 ): void {
   const denySep = normalizedPath === '/' ? '/' : normalizedPath + '/'
   args.push('--tmpfs', normalizedPath)
+  pushReadMask(mountPlan, normalizedPath, 'tmpfs')
 
   // Re-allow specific paths within the denied directory (allowRead overrides denyRead).
   // After mounting tmpfs over the denied dir, bind back the allowed subdirectories
@@ -765,6 +814,7 @@ function pushReadDenyDirMounts(
       }
       // Bind the allowed path back over the tmpfs so it's readable
       args.push('--ro-bind', allowPath, allowPath)
+      pushUniquePath(mountPlan.readAllowBinds, allowPath)
       logForDebugging(
         `[Sandbox Linux] Re-allowed read access within denied region: ${allowPath}`,
       )
@@ -793,8 +843,9 @@ async function generateFilesystemArgs(
   mandatoryDenySearchDepth: number = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH,
   allowGitConfig = false,
   abortSignal?: AbortSignal,
-): Promise<string[]> {
+): Promise<LinuxFilesystemArgsResult> {
   const args: string[] = []
+  const mountPlan = createEmptyMountPlan()
   // fs already imported
 
   // Collect normalized allowed write paths. Populated in the writeConfig
@@ -803,11 +854,13 @@ async function generateFilesystemArgs(
   // denyWrite binds are buffered and emitted after denyRead processing so that
   // a denyRead tmpfs over an ancestor directory doesn't wipe them out.
   const denyWriteArgs: string[] = []
+  const denyWriteReasons = new Map<string, LinuxReadonlyBindReason>()
 
   // Determine initial root mount based on write restrictions
   if (writeConfig) {
     // Write restrictions: Start with read-only root, then allow writes to specific paths
     args.push('--ro-bind', '/', '/')
+    mountPlan.rootReadonly = true
 
     // Allow writes to specific paths
     for (const pathPattern of writeConfig.allowOnly || []) {
@@ -858,17 +911,28 @@ async function generateFilesystemArgs(
 
       args.push('--bind', normalizedPath, normalizedPath)
       allowedWritePaths.push(normalizedPath)
+      pushUniquePath(mountPlan.writableBinds, normalizedPath)
     }
 
     // Deny writes within allowed paths (user-specified + mandatory denies)
-    const denyPaths = [
-      ...(writeConfig.denyWithinAllow || []),
-      ...(await linuxGetMandatoryDenyPaths(
-        ripgrepConfig,
-        mandatoryDenySearchDepth,
-        allowGitConfig,
-        abortSignal,
-      )),
+    const mandatoryDenyPaths = await linuxGetMandatoryDenyPaths(
+      ripgrepConfig,
+      mandatoryDenySearchDepth,
+      allowGitConfig,
+      abortSignal,
+    )
+    const denyPaths: Array<{
+      pathPattern: string
+      reason: LinuxReadonlyBindReason
+    }> = [
+      ...(writeConfig.denyWithinAllow || []).map(pathPattern => ({
+        pathPattern,
+        reason: 'denyWrite' as const,
+      })),
+      ...mandatoryDenyPaths.map(pathPattern => ({
+        pathPattern,
+        reason: 'mandatoryDenyWrite' as const,
+      })),
     ]
 
     // Dedup post-normalization: entries like ['~/.foo', '/home/user/.foo']
@@ -876,7 +940,7 @@ async function generateFilesystemArgs(
     // hits a char device on the second pass and bwrap's ensure_file() falls
     // through to creat() on a read-only mount.
     const seenDenyWrite = new Set<string>()
-    for (const pathPattern of denyPaths) {
+    for (const { pathPattern, reason } of denyPaths) {
       const normalizedPath = normalizePathForSandbox(pathPattern)
       if (seenDenyWrite.has(normalizedPath)) continue
       seenDenyWrite.add(normalizedPath)
@@ -893,6 +957,7 @@ async function generateFilesystemArgs(
       const symlinkInPath = findSymlinkInPath(normalizedPath, allowedWritePaths)
       if (symlinkInPath) {
         denyWriteArgs.push('--ro-bind', '/dev/null', symlinkInPath)
+        denyWriteReasons.set(symlinkInPath, 'symlinkDenyWrite')
         logForDebugging(
           `[Sandbox Linux] Mounted /dev/null at symlink ${symlinkInPath} to prevent symlink replacement attack`,
         )
@@ -945,6 +1010,7 @@ async function generateFilesystemArgs(
               path.join(tmpdir(), 'claude-empty-'),
             )
             denyWriteArgs.push('--ro-bind', emptyDir, firstNonExistent)
+            denyWriteReasons.set(firstNonExistent, reason)
             bwrapMountPoints.add(firstNonExistent)
             registerExitCleanupHandler()
             logForDebugging(
@@ -952,6 +1018,7 @@ async function generateFilesystemArgs(
             )
           } else {
             denyWriteArgs.push('--ro-bind', '/dev/null', firstNonExistent)
+            denyWriteReasons.set(firstNonExistent, reason)
             bwrapMountPoints.add(firstNonExistent)
             registerExitCleanupHandler()
             logForDebugging(
@@ -976,6 +1043,7 @@ async function generateFilesystemArgs(
 
       if (isWithinAllowedPath) {
         denyWriteArgs.push('--ro-bind', normalizedPath, normalizedPath)
+        denyWriteReasons.set(normalizedPath, reason)
       } else {
         logForDebugging(
           `[Sandbox Linux] Skipping deny path not within allowed paths: ${normalizedPath}`,
@@ -985,6 +1053,7 @@ async function generateFilesystemArgs(
   } else {
     // No write restrictions: Allow all writes
     args.push('--bind', '/', '/')
+    pushUniquePath(mountPlan.writableBinds, '/')
   }
   // denyWriteArgs is emitted after the denyRead loop below.
 
@@ -1047,6 +1116,7 @@ async function generateFilesystemArgs(
         normalizedPath,
         allowedWritePaths,
         readAllowPaths,
+        mountPlan,
       )
     } else {
       // For files, only an exact allowRead match overrides the deny. A
@@ -1061,6 +1131,7 @@ async function generateFilesystemArgs(
       }
       // For files, bind /dev/null instead of tmpfs
       args.push('--ro-bind', '/dev/null', normalizedPath)
+      pushReadMask(mountPlan, normalizedPath, 'dev-null')
       maskedFiles.add(normalizedPath)
     }
   }
@@ -1100,6 +1171,7 @@ async function generateFilesystemArgs(
       continue
     }
     args.push(denyWriteArgs[i]!, denyWriteArgs[i + 1]!, dest)
+    pushReadonlyBind(mountPlan, dest, denyWriteReasons.get(dest) ?? 'denyWrite')
     emittedDenyWriteDests.push(dest)
   }
 
@@ -1112,7 +1184,13 @@ async function generateFilesystemArgs(
       logForDebugging(
         `[Sandbox Linux] Re-applying denyRead tmpfs re-exposed by denyWrite bind: ${tmpfsDir}`,
       )
-      pushReadDenyDirMounts(args, tmpfsDir, allowedWritePaths, readAllowPaths)
+      pushReadDenyDirMounts(
+        args,
+        tmpfsDir,
+        allowedWritePaths,
+        readAllowPaths,
+        mountPlan,
+      )
     }
   }
   // Same problem for read-denied files: the /dev/null mask landed before the
@@ -1123,10 +1201,11 @@ async function generateFilesystemArgs(
         `[Sandbox Linux] Re-applying denyRead file mask re-exposed by denyWrite bind: ${maskedFile}`,
       )
       args.push('--ro-bind', '/dev/null', maskedFile)
+      pushReadMask(mountPlan, maskedFile, 'dev-null')
     }
   }
 
-  return args
+  return { args, mountPlan }
 }
 
 /**
@@ -1327,7 +1406,7 @@ export async function wrapCommandWithSandboxLinux(
     }
 
     // ========== FILESYSTEM RESTRICTIONS ==========
-    const fsArgs = await generateFilesystemArgs(
+    const fsResult = await generateFilesystemArgs(
       readConfig,
       writeConfig,
       ripgrepConfig,
@@ -1335,7 +1414,12 @@ export async function wrapCommandWithSandboxLinux(
       allowGitConfig,
       abortSignal,
     )
-    bwrapArgs.push(...fsArgs)
+    bwrapArgs.push(...fsResult.args)
+    violationTrace?.onPolicy?.({
+      filesystem: fsResult.mountPlan,
+      networkRestricted: needsNetworkRestriction,
+      unixSocketBlocking: !!applySeccompPrefix,
+    })
 
     // Always bind /dev
     bwrapArgs.push('--dev', '/dev')

@@ -4,9 +4,22 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import {
   parseLinuxViolationTraceSession,
+  type LinuxSandboxMountPlan,
   type LinuxViolationTraceSession,
 } from '../../src/sandbox/linux-violation-tracer.js'
 import { encodeSandboxedCommand } from '../../src/sandbox/sandbox-utils.js'
+
+const defaultMountPlan: LinuxSandboxMountPlan = {
+  rootReadonly: true,
+  writableBinds: ['/repo'],
+  readMasks: [
+    { path: '/home/user/.ssh', kind: 'tmpfs' },
+    { path: '/ignored', kind: 'tmpfs' },
+    { path: '/reported', kind: 'dev-null' },
+  ],
+  readAllowBinds: [],
+  readonlyBinds: [{ path: '/repo/.env', reason: 'denyWrite' }],
+}
 
 function makeSession(command = 'node script.js'): LinuxViolationTraceSession {
   const traceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'srt-trace-test-'))
@@ -14,6 +27,12 @@ function makeSession(command = 'node script.js'): LinuxViolationTraceSession {
     runId: 'run123',
     command,
     encodedCommand: encodeSandboxedCommand(command),
+    cwd: process.cwd(),
+    policy: {
+      filesystem: defaultMountPlan,
+      networkRestricted: true,
+      unixSocketBlocking: true,
+    },
     traceDir,
     tracePrefix: path.join(traceDir, 'trace'),
     parsed: false,
@@ -47,6 +66,30 @@ describe('linux violation trace parser', () => {
     expect(events.every(e => e.encodedCommand === session.encodedCommand)).toBe(
       true,
     )
+  })
+
+  it('suppresses benign readlink EINVAL outside actual read masks', () => {
+    const session = makeSession()
+
+    fs.writeFileSync(
+      path.join(session.traceDir, 'trace.123'),
+      'readlink(".git/index", 0x7fff, 1023) = -1 EINVAL (Invalid argument)',
+    )
+
+    expect(parseLinuxViolationTraceSession(session)).toEqual([])
+  })
+
+  it('reports readlink EINVAL when an actual dev-null read mask hides the target', () => {
+    const session = makeSession()
+
+    fs.writeFileSync(
+      path.join(session.traceDir, 'trace.123'),
+      'readlink("/reported", 0x7fff, 1023) = -1 EINVAL (Invalid argument)',
+    )
+
+    expect(parseLinuxViolationTraceSession(session).map(e => e.line)).toEqual([
+      'linux file-read denied: readlink("/reported") -> EINVAL (Invalid argument)',
+    ])
   })
 
   it('applies wildcard and command-specific ignoreViolations filters', () => {

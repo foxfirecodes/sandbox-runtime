@@ -8,13 +8,35 @@ import { encodeSandboxedCommand } from './sandbox-utils.js'
 import { logForDebugging } from '../utils/debug.js'
 import { whichSync } from '../utils/which.js'
 
+export type LinuxReadMaskKind = 'tmpfs' | 'dev-null'
+export type LinuxReadonlyBindReason =
+  | 'denyWrite'
+  | 'mandatoryDenyWrite'
+  | 'symlinkDenyWrite'
+
+export interface LinuxSandboxMountPlan {
+  rootReadonly: boolean
+  writableBinds: string[]
+  readMasks: Array<{ path: string; kind: LinuxReadMaskKind }>
+  readAllowBinds: string[]
+  readonlyBinds: Array<{ path: string; reason: LinuxReadonlyBindReason }>
+}
+
+export interface LinuxViolationTracePolicy {
+  filesystem: LinuxSandboxMountPlan
+  networkRestricted: boolean
+  unixSocketBlocking: boolean
+}
+
 export interface LinuxViolationTraceSession {
   runId: string
   command: string
   encodedCommand: string
+  cwd: string
   traceDir: string
   tracePrefix: string
   parsed: boolean
+  policy?: LinuxViolationTracePolicy
 }
 
 export interface LinuxStraceConfig {
@@ -26,6 +48,7 @@ export interface LinuxViolationTraceConfig {
   tracePrefix: string
   stracePath: string
   straceArgs: string[]
+  onPolicy?(policy: LinuxViolationTracePolicy): void
 }
 
 const FILE_SYSCALLS = new Set([
@@ -170,6 +193,7 @@ export function createLinuxViolationTraceSession(
     runId,
     command,
     encodedCommand: encodeSandboxedCommand(command),
+    cwd: process.cwd(),
     traceDir,
     tracePrefix: path.join(traceDir, 'trace'),
     parsed: false,
@@ -184,6 +208,9 @@ export function toLinuxViolationTraceConfig(
     tracePrefix: session.tracePrefix,
     stracePath: straceConfig.stracePath,
     straceArgs: [...straceConfig.args],
+    onPolicy: policy => {
+      session.policy = policy
+    },
   }
 }
 
@@ -195,6 +222,7 @@ export function parseLinuxViolationTraceSession(
 
   const events: SandboxViolationEvent[] = []
   const seen = new Set<string>()
+  let suppressedCount = 0
 
   for (const file of getTraceFiles(session)) {
     let content: string
@@ -209,8 +237,13 @@ export function parseLinuxViolationTraceSession(
     }
 
     for (const line of content.split('\n')) {
-      const eventLine = parseTraceLine(line.trim())
-      if (!eventLine || seen.has(eventLine)) continue
+      const trimmed = line.trim()
+      const eventLine = parseTraceLine(trimmed, session)
+      if (!eventLine) {
+        if (trimmed) suppressedCount++
+        continue
+      }
+      if (seen.has(eventLine)) continue
       if (
         shouldIgnoreLinuxViolation(eventLine, session.command, ignoreViolations)
       ) {
@@ -224,6 +257,12 @@ export function parseLinuxViolationTraceSession(
         timestamp: new Date(),
       })
     }
+  }
+
+  if (suppressedCount > 0 && process.env.SRT_DEBUG) {
+    logForDebugging(
+      `[Linux violation tracer] Suppressed ${suppressedCount} non-sandbox trace failures for command: ${session.command}`,
+    )
   }
 
   session.parsed = true
@@ -279,7 +318,10 @@ function getTraceFiles(session: LinuxViolationTraceSession): string[] {
   }
 }
 
-function parseTraceLine(line: string): string | undefined {
+function parseTraceLine(
+  line: string,
+  session: LinuxViolationTraceSession,
+): string | undefined {
   if (!line) return undefined
 
   // strace failed syscall lines look like:
@@ -294,11 +336,23 @@ function parseTraceLine(line: string): string | undefined {
   if (!syscall || !args || !errno || !message) return undefined
 
   if (NETWORK_SYSCALLS.has(syscall)) {
-    return formatNetworkFailure(syscall, args, errno, message, line)
+    return shouldReportNetworkFailure(syscall, args, errno, session.policy)
+      ? formatNetworkFailure(syscall, args, errno, message, line)
+      : undefined
   }
 
   if (FILE_SYSCALLS.has(syscall)) {
-    return formatFileFailure(syscall, args, errno, message, line)
+    const filePath = extractFirstString(args)
+    const normalizedPath = normalizeTracePath(filePath, session.cwd)
+    const op = inferFileOperation(syscall, args)
+    return shouldReportFileFailure(
+      errno,
+      op,
+      normalizedPath,
+      session.policy?.filesystem,
+    )
+      ? formatFileFailure(syscall, errno, message, line, filePath, op)
+      : undefined
   }
 
   return `linux trace failure: ${line}`
@@ -306,17 +360,75 @@ function parseTraceLine(line: string): string | undefined {
 
 function formatFileFailure(
   syscall: string,
-  args: string,
   errno: string,
   message: string,
   raw: string,
+  filePath: string | undefined,
+  op: 'read' | 'write',
 ): string {
-  const filePath = extractFirstString(args)
-  const op = inferFileOperation(syscall, args)
   if (!filePath) {
     return `linux file-${op} denied: ${syscall} -> ${errno} (${message}); raw=${raw}`
   }
   return `linux file-${op} denied: ${syscall}("${filePath}") -> ${errno} (${message})`
+}
+
+function shouldReportFileFailure(
+  errno: string,
+  op: 'read' | 'write',
+  normalizedPath: string | undefined,
+  mountPlan: LinuxSandboxMountPlan | undefined,
+): boolean {
+  if (!normalizedPath || !mountPlan) {
+    return isStrongFileErrno(errno)
+  }
+
+  const activeReadMask = isUnderActiveReadMask(normalizedPath, mountPlan)
+  const readonlyBind = isUnderReadonlyBind(normalizedPath, mountPlan)
+  const outsideWritableRoot =
+    mountPlan.rootReadonly &&
+    !isUnderAny(normalizedPath, mountPlan.writableBinds)
+
+  if (op === 'write') {
+    if (readonlyBind || activeReadMask) return isWriteSandboxErrno(errno)
+    if (outsideWritableRoot) return isWriteSandboxErrno(errno)
+    return false
+  }
+
+  if (activeReadMask) {
+    // denyRead tmpfs/dev-null masks can surface as ENOENT (hidden subtree),
+    // EACCES/EPERM, or EINVAL for readlink against a dev-null file mask.
+    return ['ENOENT', 'EACCES', 'EPERM', 'EINVAL'].includes(errno)
+  }
+
+  // Reads outside our actual read masks are normal application/host failures,
+  // not sandbox denials. In particular, readlink regular-file => EINVAL and
+  // optional config discovery => ENOENT are expected probing patterns.
+  return false
+}
+
+function shouldReportNetworkFailure(
+  syscall: string,
+  args: string,
+  errno: string,
+  policy: LinuxViolationTracePolicy | undefined,
+): boolean {
+  if (syscall === 'socket' || syscall === 'socketpair') {
+    const family = /\bAF_[A-Z0-9_]+\b/.exec(args)?.[0]
+    return (
+      family === 'AF_UNIX' && errno === 'EPERM' && !!policy?.unixSocketBlocking
+    )
+  }
+
+  if (!policy?.networkRestricted) return false
+  return ['ENETUNREACH', 'EHOSTUNREACH', 'EPERM', 'EACCES'].includes(errno)
+}
+
+function isStrongFileErrno(errno: string): boolean {
+  return ['EACCES', 'EPERM', 'EROFS'].includes(errno)
+}
+
+function isWriteSandboxErrno(errno: string): boolean {
+  return ['EACCES', 'EPERM', 'EROFS', 'ENOSPC'].includes(errno)
 }
 
 function inferFileOperation(syscall: string, args: string): 'read' | 'write' {
@@ -345,6 +457,54 @@ function formatNetworkFailure(
     return `linux network denied: ${syscall}(${endpoint}) -> ${errno} (${message})`
   }
   return `linux network denied: ${syscall} -> ${errno} (${message}); raw=${raw}`
+}
+
+function isUnderActiveReadMask(
+  normalizedPath: string,
+  mountPlan: LinuxSandboxMountPlan,
+): boolean {
+  for (const mask of mountPlan.readMasks) {
+    if (mask.kind === 'dev-null') {
+      if (normalizedPath === mask.path) return true
+      continue
+    }
+
+    if (!isPathAtOrUnder(normalizedPath, mask.path)) continue
+    if (isUnderAny(normalizedPath, mountPlan.readAllowBinds)) continue
+    if (isUnderAny(normalizedPath, mountPlan.writableBinds)) continue
+    return true
+  }
+
+  return false
+}
+
+function isUnderReadonlyBind(
+  normalizedPath: string,
+  mountPlan: LinuxSandboxMountPlan,
+): boolean {
+  return mountPlan.readonlyBinds.some(bind =>
+    isPathAtOrUnder(normalizedPath, bind.path),
+  )
+}
+
+function isUnderAny(normalizedPath: string, bases: string[]): boolean {
+  return bases.some(base => isPathAtOrUnder(normalizedPath, base))
+}
+
+function isPathAtOrUnder(normalizedPath: string, basePath: string): boolean {
+  if (basePath === '/') return normalizedPath.startsWith('/')
+  return (
+    normalizedPath === basePath || normalizedPath.startsWith(basePath + '/')
+  )
+}
+
+function normalizeTracePath(
+  tracePath: string | undefined,
+  cwd: string,
+): string | undefined {
+  if (!tracePath) return undefined
+  if (tracePath.startsWith('/')) return path.normalize(tracePath)
+  return path.resolve(cwd, tracePath)
 }
 
 function extractEndpoint(args: string): string | undefined {
